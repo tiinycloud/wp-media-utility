@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP Media Utility
  * Description: WordPress media testing utility for the block editor (CSM gates, upload path tracking, Values tab, export).
- * Version: 1.5.0
+ * Version: 1.5.1
  * Author: TiinyCloud
  * Requires at least: 7.1
  * Requires PHP: 7.4
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WP_MEDIA_UTILITY_VERSION', '1.5.0' );
+define( 'WP_MEDIA_UTILITY_VERSION', '1.5.1' );
 define( 'WP_MEDIA_UTILITY_FILE', __FILE__ );
 define( 'WP_MEDIA_UTILITY_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WP_MEDIA_UTILITY_URL', plugin_dir_url( __FILE__ ) );

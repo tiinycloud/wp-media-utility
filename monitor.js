@@ -32,7 +32,25 @@
 	let pendingSeq = 0;
 
 	function now() {
-		return new Date().toLocaleTimeString();
+		const d = new Date();
+		const pad = ( n, w ) => String( n ).padStart( w || 2, '0' );
+		let h = d.getHours();
+		const ampm = h >= 12 ? 'PM' : 'AM';
+		h = h % 12;
+		if ( h === 0 ) {
+			h = 12;
+		}
+		return (
+			h +
+			':' +
+			pad( d.getMinutes() ) +
+			':' +
+			pad( d.getSeconds() ) +
+			'.' +
+			pad( d.getMilliseconds(), 3 ) +
+			' ' +
+			ampm
+		);
 	}
 
 	function isoNow() {
