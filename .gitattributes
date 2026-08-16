@@ -1,0 +1,4 @@
+# Prefer PHP for language stats (this is a WordPress plugin).
+# monitor.js is the UI companion and would otherwise dominate Linguist.
+monitor.js linguist-vendored
+*.php linguist-detectable=true
