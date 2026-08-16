@@ -12,7 +12,8 @@ Published by [TiinyCloud](https://github.com/tiinycloud).
 - Stats + filters, expand/collapse
 - **Test Files** tab: PR #13068 fixtures with one-click CSM upload, status pills, and expandable per-file event log
 - **Server** tab: live PHP filters, window flags, REST image settings, browser probes
-- **Settings** tab: utility prefs (e.g. insert Image blocks with Test Files uploads)
+- **Settings** tab: insert prefs, reset panel layout
+- Drag the header to move; drag the bottom-right corner to resize (saved per browser tab)
 - Export JSON (Shift+click = CSV), Copy report
 - Clear session / clear disk log / wipe media (throwaway test sites; Wipe requires admin)
 - Hover tooltips on controls
@@ -42,7 +43,10 @@ Copy `wp-media-utility/` to `wp-content/plugins/wp-media-utility/` and activate.
 ### Test Files tab
 Lists curated images from [PR #13068](https://github.com/WordPress/wordpress-develop/pull/13068). Each **Upload** fetches the file from GitHub raw and sends it through `core/upload-media` `addItems` (same pipeline as a real editor upload). Rows show the same status pills as **Logs** (`CLIENT DONE` / `SERVER` / `ERROR`) and expand for create / sideload / finalize events.
 
-Optional: **Settings → Insert Image blocks with Test Files uploads** inserts a `core/image` block the same way as drag-and-drop (blob first, then CSM upload). Off by default.
+Optional: **Settings → Insert Image blocks with Test Files uploads** (on by default).
+
+- **Single Upload** inserts a blob `core/image` (same as drag-and-drop) so CSM runs through the block.
+- **Upload all / group** uploads via `upload-media` one file at a time, waits until the attachment exists and the queue is quiet, then inserts a finished Image block — so Gutenberg is not clogged with concurrent blob CSM jobs.
 
 Override the raw base URL if the PR branch moves:
 
