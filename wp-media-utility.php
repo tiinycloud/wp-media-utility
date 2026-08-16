@@ -1,51 +1,51 @@
 <?php
 /**
- * Plugin Name: WP CSM Monitor
- * Description: Floating block-editor panel for WordPress 7.1 client-side media (CSM) testing — gates, uploads, Values tab, export.
- * Version: 1.4.0
+ * Plugin Name: WP Media Utility
+ * Description: WordPress media testing utility for the block editor (CSM gates, upload path tracking, Values tab, export).
+ * Version: 1.5.0
  * Author: TiinyCloud
  * Requires at least: 7.1
  * Requires PHP: 7.4
  * License: GPL-2.0-or-later
- * Text Domain: wp-csm-monitor
+ * Text Domain: wp-media-utility
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WP_CSM_MONITOR_VERSION', '1.4.0' );
-define( 'WP_CSM_MONITOR_FILE', __FILE__ );
-define( 'WP_CSM_MONITOR_DIR', plugin_dir_path( __FILE__ ) );
-define( 'WP_CSM_MONITOR_URL', plugin_dir_url( __FILE__ ) );
+define( 'WP_MEDIA_UTILITY_VERSION', '1.5.0' );
+define( 'WP_MEDIA_UTILITY_FILE', __FILE__ );
+define( 'WP_MEDIA_UTILITY_DIR', plugin_dir_path( __FILE__ ) );
+define( 'WP_MEDIA_UTILITY_URL', plugin_dir_url( __FILE__ ) );
 
 /**
  * Primary log path (inside the site uploads dir).
  */
-function wp_csm_monitor_log_path(): string {
+function wp_media_utility_log_path(): string {
 	$dir = WP_CONTENT_DIR . '/uploads';
 	if ( ! is_dir( $dir ) ) {
 		wp_mkdir_p( $dir );
 	}
-	return trailingslashit( $dir ) . 'wp-csm-monitor.jsonl';
+	return trailingslashit( $dir ) . 'wp-media-utility.jsonl';
 }
 
 /**
  * Optional mirror path.
  *
  * Define in wp-config.php to also write logs somewhere convenient, e.g.:
- *   define( 'WP_CSM_MONITOR_MIRROR', '/path/to/workspace/logs/wp-csm-monitor.jsonl' );
+ *   define( 'WP_MEDIA_UTILITY_MIRROR', '/path/to/workspace/logs/wp-media-utility.jsonl' );
  *
- * Or filter: add_filter( 'wp_csm_monitor_mirror_path', fn() => '/tmp/csm.jsonl' );
+ * Or filter: add_filter( 'wp_media_utility_mirror_path', fn() => '/tmp/csm.jsonl' );
  */
-function wp_csm_monitor_mirror_path(): string {
-	$default = defined( 'WP_CSM_MONITOR_MIRROR' ) ? (string) WP_CSM_MONITOR_MIRROR : '';
+function wp_media_utility_mirror_path(): string {
+	$default = defined( 'WP_MEDIA_UTILITY_MIRROR' ) ? (string) WP_MEDIA_UTILITY_MIRROR : '';
 	/**
 	 * Filters the optional secondary log path.
 	 *
 	 * @param string $path Absolute filesystem path, or empty to disable mirroring.
 	 */
-	return (string) apply_filters( 'wp_csm_monitor_mirror_path', $default );
+	return (string) apply_filters( 'wp_media_utility_mirror_path', $default );
 }
 
 /**
@@ -54,7 +54,7 @@ function wp_csm_monitor_mirror_path(): string {
  * @param array<int,array<string,mixed>> $records Records to append.
  * @return true|\WP_Error
  */
-function wp_csm_monitor_append_records( array $records ) {
+function wp_media_utility_append_records( array $records ) {
 	if ( empty( $records ) ) {
 		return true;
 	}
@@ -72,7 +72,7 @@ function wp_csm_monitor_append_records( array $records ) {
 		return true;
 	}
 
-	$primary = wp_csm_monitor_log_path();
+	$primary = wp_media_utility_log_path();
 	$result  = file_put_contents( $primary, $lines, FILE_APPEND | LOCK_EX );
 	if ( false === $result ) {
 		return new WP_Error( 'csm_log_write_failed', 'Could not write CSM monitor log.', array( 'status' => 500 ) );
@@ -83,7 +83,7 @@ function wp_csm_monitor_append_records( array $records ) {
 		@rename( $primary, $primary . '.prev' );
 	}
 
-	$mirror = wp_csm_monitor_mirror_path();
+	$mirror = wp_media_utility_mirror_path();
 	if ( $mirror ) {
 		$mirror_dir = dirname( $mirror );
 		if ( ! is_dir( $mirror_dir ) ) {
@@ -106,7 +106,7 @@ function wp_csm_monitor_append_records( array $records ) {
  *
  * @return array<string,mixed>
  */
-function wp_csm_monitor_collect_diagnostics(): array {
+function wp_media_utility_collect_diagnostics(): array {
 	$host           = strtolower( (string) strtok( $_SERVER['HTTP_HOST'] ?? '', ':' ) );
 	$secure_default = ( is_ssl() || 'localhost' === $host || str_ends_with( $host, '.localhost' ) );
 	$enabled        = function_exists( 'wp_is_client_side_media_processing_enabled' )
@@ -164,7 +164,7 @@ add_action(
 	'rest_api_init',
 	static function (): void {
 		register_rest_route(
-			'wp-csm-monitor/v1',
+			'wp-media-utility/v1',
 			'/diagnostics',
 			array(
 				'methods'             => 'GET',
@@ -172,13 +172,13 @@ add_action(
 					return current_user_can( 'upload_files' );
 				},
 				'callback'            => static function () {
-					return rest_ensure_response( wp_csm_monitor_collect_diagnostics() );
+					return rest_ensure_response( wp_media_utility_collect_diagnostics() );
 				},
 			)
 		);
 
 		register_rest_route(
-			'wp-csm-monitor/v1',
+			'wp-media-utility/v1',
 			'/log',
 			array(
 				'methods'             => 'POST',
@@ -205,7 +205,7 @@ add_action(
 						$normalized[]                 = $record;
 					}
 
-					$write = wp_csm_monitor_append_records( $normalized );
+					$write = wp_media_utility_append_records( $normalized );
 					if ( is_wp_error( $write ) ) {
 						return $write;
 					}
@@ -214,8 +214,8 @@ add_action(
 						array(
 							'ok'     => true,
 							'count'  => count( $normalized ),
-							'path'   => wp_csm_monitor_log_path(),
-							'mirror' => wp_csm_monitor_mirror_path(),
+							'path'   => wp_media_utility_log_path(),
+							'mirror' => wp_media_utility_mirror_path(),
 						)
 					);
 				},
@@ -223,7 +223,7 @@ add_action(
 		);
 
 		register_rest_route(
-			'wp-csm-monitor/v1',
+			'wp-media-utility/v1',
 			'/log',
 			array(
 				'methods'             => 'DELETE',
@@ -231,7 +231,7 @@ add_action(
 					return current_user_can( 'upload_files' );
 				},
 				'callback'            => static function () {
-					foreach ( array( wp_csm_monitor_log_path(), wp_csm_monitor_mirror_path() ) as $path ) {
+					foreach ( array( wp_media_utility_log_path(), wp_media_utility_mirror_path() ) as $path ) {
 						if ( ! $path ) {
 							continue;
 						}
@@ -256,14 +256,14 @@ add_action(
 			return;
 		}
 
-		$js_path = WP_CSM_MONITOR_DIR . 'monitor.js';
-		$js_url  = WP_CSM_MONITOR_URL . 'monitor.js';
+		$js_path = WP_MEDIA_UTILITY_DIR . 'monitor.js';
+		$js_url  = WP_MEDIA_UTILITY_URL . 'monitor.js';
 
 		if ( ! file_exists( $js_path ) ) {
 			return;
 		}
 
-		$handle = 'wp-csm-monitor';
+		$handle = 'wp-media-utility';
 
 		wp_enqueue_script(
 			$handle,
@@ -285,7 +285,7 @@ add_action(
 
 		wp_add_inline_script(
 			$handle,
-			'window.__wpCsmMonitor = ' . wp_json_encode(
+			'window.__wpMediaUtility = ' . wp_json_encode(
 				array(
 					'phpEnabled'    => (bool) $enabled,
 					'siteUrl'       => home_url( '/' ),
@@ -294,9 +294,9 @@ add_action(
 					'chromiumMajor' => $chromium,
 					'dipEligible'   => ( null !== $chromium && $chromium >= 137 ),
 					'canDelete'     => current_user_can( 'delete_posts' ),
-					'logPath'       => wp_csm_monitor_log_path(),
-					'mirrorPath'    => wp_csm_monitor_mirror_path(),
-					'version'       => WP_CSM_MONITOR_VERSION,
+					'logPath'       => wp_media_utility_log_path(),
+					'mirrorPath'    => wp_media_utility_mirror_path(),
+					'version'       => WP_MEDIA_UTILITY_VERSION,
 				)
 			) . ';',
 			'before'

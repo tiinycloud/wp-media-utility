@@ -1,11 +1,11 @@
 /**
- * WP CSM Monitor — realtime client-side vs server-side media panel.
+ * WP Media Utility — realtime client-side vs server-side media panel.
  * Groups activity by image with collapsible rows and status pills.
  */
 ( function () {
 	'use strict';
 
-	const boot = window.__wpCsmMonitor || {};
+	const boot = window.__wpMediaUtility || {};
 	const MAX_UPLOADS = 100;
 	const MAX_EVENTS_PER_UPLOAD = 40;
 
@@ -274,7 +274,7 @@
 		let server = null;
 		try {
 			if ( window.wp && wp.apiFetch ) {
-				server = await wp.apiFetch( { path: '/wp-csm-monitor/v1/diagnostics' } );
+				server = await wp.apiFetch( { path: '/wp-media-utility/v1/diagnostics' } );
 			}
 		} catch ( e ) {
 			state.diagnosticsError = String( e && e.message ? e.message : e );
@@ -570,12 +570,12 @@
 				];
 				rows.push( cells.join( ',' ) );
 			} );
-			downloadBlob( 'wp-csm-monitor-' + stamp + '.csv', 'text/csv;charset=utf-8', rows.join( '\n' ) );
+			downloadBlob( 'wp-media-utility-' + stamp + '.csv', 'text/csv;charset=utf-8', rows.join( '\n' ) );
 			queueLog( { type: 'meta', note: 'exported csv · ' + payload.uploads.length + ' uploads' } );
 			return;
 		}
 		downloadBlob(
-			'wp-csm-monitor-' + stamp + '.json',
+			'wp-media-utility-' + stamp + '.json',
 			'application/json;charset=utf-8',
 			JSON.stringify( payload, null, 2 )
 		);
@@ -622,11 +622,11 @@
 		}
 		const records = state.logBuffer.splice( 0, state.logBuffer.length );
 		wp.apiFetch( {
-			path: '/wp-csm-monitor/v1/log',
+			path: '/wp-media-utility/v1/log',
 			method: 'POST',
 			data: { records },
 		} ).catch( ( e ) => {
-			console.warn( '[wp-csm-monitor] log write failed', e );
+			console.warn( '[wp-media-utility] log write failed', e );
 			state.logBuffer = records.concat( state.logBuffer );
 		} );
 	}
@@ -731,7 +731,7 @@
 		if ( window.wp && wp.apiFetch && typeof wp.apiFetch.use === 'function' ) {
 			wp.apiFetch.use( ( options, next ) => {
 				const url = options.url || options.path || '';
-				if ( String( url ).indexOf( '/wp-csm-monitor/v1/' ) !== -1 ) {
+				if ( String( url ).indexOf( '/wp-media-utility/v1/' ) !== -1 ) {
 					return next( options );
 				}
 				const method = options.method || 'GET';
@@ -996,7 +996,7 @@
 		const d = state.detection || detect();
 		const stats = computeStats();
 		const lines = [];
-		lines.push( 'WP CSM Monitor' );
+		lines.push( 'WP Media Utility' );
 		lines.push( 'Time: ' + new Date().toISOString() );
 		lines.push( 'URL: ' + location.href );
 		lines.push( '' );
@@ -1093,7 +1093,7 @@
 		const label = button.textContent;
 		button.disabled = true;
 		try {
-			await wp.apiFetch( { path: '/wp-csm-monitor/v1/log', method: 'DELETE' } );
+			await wp.apiFetch( { path: '/wp-media-utility/v1/log', method: 'DELETE' } );
 			button.textContent = 'Cleared';
 			queueLog( { type: 'meta', note: 'disk log cleared' } );
 		} catch ( e ) {
@@ -1384,7 +1384,7 @@
 		);
 
 		root.appendChild(
-			valuesSection( 'php', 'PHP (live via /wp-csm-monitor/v1/diagnostics)', Object.entries( php ) )
+			valuesSection( 'php', 'PHP (live via /wp-media-utility/v1/diagnostics)', Object.entries( php ) )
 		);
 
 		root.appendChild(
@@ -1446,7 +1446,7 @@
 
 	function render() {
 		injectStyles();
-		const root = document.getElementById( 'wp-csm-monitor' );
+		const root = document.getElementById( 'wp-media-utility' );
 		if ( ! root ) {
 			return;
 		}
@@ -1486,7 +1486,7 @@
 				className: 'csm-monitor__toggle',
 				type: 'button',
 				text: 'Clear log',
-				title: 'Delete on-disk JSONL log files (uploads/wp-csm-monitor.jsonl and mirror)',
+				title: 'Delete on-disk JSONL log files (uploads/wp-media-utility.jsonl and mirror)',
 				onClick: ( e ) => clearDiskLog( e.currentTarget ),
 			} ),
 			el( 'button', {
@@ -1503,8 +1503,8 @@
 				el( 'div', { className: 'csm-monitor__title-row' }, [
 					el( 'div', {
 						className: 'csm-monitor__title',
-						text: 'WP CSM Monitor',
-						title: 'WP CSM Monitor — WordPress 7.1 client-side media testing utility',
+						text: 'WP Media Utility',
+						title: 'WP Media Utility — WordPress 7.1 client-side media testing utility',
 					} ),
 					boot.version
 						? el( 'span', {
@@ -1748,10 +1748,10 @@
 	}
 
 	function injectStyles() {
-		let css = document.getElementById( 'wp-wp-csm-monitor-style' );
+		let css = document.getElementById( 'wp-wp-media-utility-style' );
 		if ( ! css ) {
 			css = document.createElement( 'style' );
-			css.id = 'wp-wp-csm-monitor-style';
+			css.id = 'wp-wp-media-utility-style';
 			document.head.appendChild( css );
 		}
 		css.textContent = `
@@ -1930,10 +1930,10 @@
 
 	function mount() {
 		injectStyles();
-		let root = document.getElementById( 'wp-csm-monitor' );
+		let root = document.getElementById( 'wp-media-utility' );
 		if ( ! root ) {
 			root = document.createElement( 'div' );
-			root.id = 'wp-csm-monitor';
+			root.id = 'wp-media-utility';
 			document.body.appendChild( root );
 		}
 		detect();
