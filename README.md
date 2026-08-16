@@ -8,11 +8,13 @@ Published by [TiinyCloud](https://github.com/tiinycloud).
 
 ## Features
 - ACTIVE / OFF status for client-side media
-- Uploads grouped by image (`CLIENT DONE`, `SERVER`, `ERROR`, …)
+- **Logs** tab: uploads grouped by image (`CLIENT DONE`, `SERVER`, `ERROR`, …)
 - Stats + filters, expand/collapse
-- Values tab: live PHP filters, window flags, REST image settings, browser probes
+- **Test Files** tab: PR #13068 fixtures with one-click CSM upload, status pills, and expandable per-file event log
+- **Server** tab: live PHP filters, window flags, REST image settings, browser probes
+- **Settings** tab: utility prefs (e.g. insert Image blocks with Test Files uploads)
 - Export JSON (Shift+click = CSV), Copy report
-- Clear session / clear log / wipe media (throwaway test sites)
+- Clear session / clear disk log / wipe media (throwaway test sites; Wipe requires admin)
 - Hover tooltips on controls
 
 ## Install
@@ -34,11 +36,26 @@ Copy `wp-media-utility/` to `wp-content/plugins/wp-media-utility/` and activate.
 ## Usage
 1. Open a post in the block editor
 2. Bottom-right panel: **WP Media Utility**
-3. Upload/drop images (don’t only select from Media Library)
+3. Upload/drop images, **or** open **Test Files** and click **Upload** on a PR #13068 fixture
 4. Expect client path: `generate_sub_sizes=false` → `sideload` → `finalize`
 
+### Test Files tab
+Lists curated images from [PR #13068](https://github.com/WordPress/wordpress-develop/pull/13068). Each **Upload** fetches the file from GitHub raw and sends it through `core/upload-media` `addItems` (same pipeline as a real editor upload). Rows show the same status pills as **Logs** (`CLIENT DONE` / `SERVER` / `ERROR`) and expand for create / sideload / finalize events.
+
+Optional: **Settings → Insert Image blocks with Test Files uploads** inserts a `core/image` block the same way as drag-and-drop (blob first, then CSM upload). Off by default.
+
+Override the raw base URL if the PR branch moves:
+
+```php
+add_filter( 'wp_media_utility_catalog_base_url', function () {
+	return 'https://raw.githubusercontent.com/OWNER/REPO/REF/';
+} );
+```
+
+External datasets (libwebp, PNGSuite, etc.) are linked for reference only.
+
 ## Optional log mirror
-Default log: `wp-content/uploads/wp-media-utility.jsonl`
+Default log: `wp-content/wp-media-utility-logs/wp-media-utility.jsonl` (outside public `uploads/`)
 
 ```php
 define( 'WP_MEDIA_UTILITY_MIRROR', '/absolute/path/to/wp-media-utility.jsonl' );

@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: WP Media Utility
- * Description: WordPress media testing utility for the block editor (CSM gates, upload path tracking, Values tab, export).
- * Version: 1.5.1
+ * Description: WordPress media testing utility for the block editor (CSM gates, Logs, Server diagnostics, Test Files, Settings).
+ * Version: 1.6.1
  * Author: TiinyCloud
  * Requires at least: 7.1
  * Requires PHP: 7.4
@@ -14,18 +14,27 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WP_MEDIA_UTILITY_VERSION', '1.5.1' );
+define( 'WP_MEDIA_UTILITY_VERSION', '1.6.1' );
 define( 'WP_MEDIA_UTILITY_FILE', __FILE__ );
 define( 'WP_MEDIA_UTILITY_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WP_MEDIA_UTILITY_URL', plugin_dir_url( __FILE__ ) );
 
 /**
- * Primary log path (inside the site uploads dir).
+ * Primary log path (outside the public uploads web root when possible).
  */
 function wp_media_utility_log_path(): string {
-	$dir = WP_CONTENT_DIR . '/uploads';
+	$dir = WP_CONTENT_DIR . '/wp-media-utility-logs';
 	if ( ! is_dir( $dir ) ) {
 		wp_mkdir_p( $dir );
+	}
+	// Best-effort: block direct web access on Apache.
+	$htaccess = trailingslashit( $dir ) . '.htaccess';
+	if ( ! file_exists( $htaccess ) ) {
+		@file_put_contents( $htaccess, "Require all denied\nDeny from all\n" );
+	}
+	$index = trailingslashit( $dir ) . 'index.php';
+	if ( ! file_exists( $index ) ) {
+		@file_put_contents( $index, "<?php\n// Silence is golden.\n" );
 	}
 	return trailingslashit( $dir ) . 'wp-media-utility.jsonl';
 }
@@ -75,7 +84,7 @@ function wp_media_utility_append_records( array $records ) {
 	$primary = wp_media_utility_log_path();
 	$result  = file_put_contents( $primary, $lines, FILE_APPEND | LOCK_EX );
 	if ( false === $result ) {
-		return new WP_Error( 'csm_log_write_failed', 'Could not write CSM monitor log.', array( 'status' => 500 ) );
+		return new WP_Error( 'wp_media_utility_log_write_failed', 'Could not write WP Media Utility log.', array( 'status' => 500 ) );
 	}
 
 	$size = file_exists( $primary ) ? filesize( $primary ) : 0;
@@ -102,7 +111,7 @@ function wp_media_utility_append_records( array $records ) {
 }
 
 /**
- * PHP-side CSM diagnostics for the Values tab.
+ * PHP-side CSM diagnostics for the Server tab.
  *
  * @return array<string,mixed>
  */
@@ -188,7 +197,7 @@ add_action(
 				'callback'            => static function ( WP_REST_Request $request ) {
 					$payload = $request->get_json_params();
 					if ( ! is_array( $payload ) ) {
-						return new WP_Error( 'csm_log_invalid', 'Expected JSON body.', array( 'status' => 400 ) );
+						return new WP_Error( 'wp_media_utility_log_invalid', 'Expected JSON body.', array( 'status' => 400 ) );
 					}
 
 					$records = isset( $payload['records'] ) && is_array( $payload['records'] )
@@ -268,7 +277,7 @@ add_action(
 		wp_enqueue_script(
 			$handle,
 			$js_url,
-			array( 'wp-data', 'wp-api-fetch', 'wp-dom-ready', 'wp-upload-media' ),
+			array( 'wp-data', 'wp-api-fetch', 'wp-dom-ready', 'wp-upload-media', 'wp-blocks', 'wp-block-editor', 'wp-blob' ),
 			(string) filemtime( $js_path ),
 			array(
 				'in_footer' => true,
@@ -281,22 +290,39 @@ add_action(
 		$chromium = function_exists( 'wp_get_chromium_major_version' )
 			? wp_get_chromium_major_version()
 			: null;
-		$host     = strtolower( ( string ) strtok( $_SERVER['HTTP_HOST'] ?? '', ':' ) );
+		$host     = strtolower( (string) strtok( $_SERVER['HTTP_HOST'] ?? '', ':' ) );
+
+		$catalog_path = WP_MEDIA_UTILITY_DIR . 'catalog.json';
+		$catalog_url  = file_exists( $catalog_path )
+			? WP_MEDIA_UTILITY_URL . 'catalog.json?v=' . (string) filemtime( $catalog_path )
+			: '';
+
+		/**
+		 * Filters the raw GitHub base URL for the Test Images catalog.
+		 *
+		 * @param string $base_url Trailing-slash URL to the branch root.
+		 */
+		$catalog_base = (string) apply_filters(
+			'wp_media_utility_catalog_base_url',
+			'https://raw.githubusercontent.com/aaronjorbin/wordpress-develop/csm/test-library/'
+		);
 
 		wp_add_inline_script(
 			$handle,
 			'window.__wpMediaUtility = ' . wp_json_encode(
 				array(
-					'phpEnabled'    => (bool) $enabled,
-					'siteUrl'       => home_url( '/' ),
-					'isSsl'         => is_ssl(),
-					'httpHost'      => $host,
+					'phpEnabled'  => (bool) $enabled,
+					'siteUrl'     => home_url( '/' ),
+					'isSsl'       => is_ssl(),
+					'httpHost'    => $host,
 					'chromiumMajor' => $chromium,
-					'dipEligible'   => ( null !== $chromium && $chromium >= 137 ),
-					'canDelete'     => current_user_can( 'delete_posts' ),
-					'logPath'       => wp_media_utility_log_path(),
-					'mirrorPath'    => wp_media_utility_mirror_path(),
-					'version'       => WP_MEDIA_UTILITY_VERSION,
+					'dipEligible' => ( null !== $chromium && $chromium >= 137 ),
+					'canDelete'   => current_user_can( 'manage_options' ),
+					'logPath'     => wp_media_utility_log_path(),
+					'mirrorPath'  => wp_media_utility_mirror_path(),
+					'version'     => WP_MEDIA_UTILITY_VERSION,
+					'catalogUrl'  => $catalog_url,
+					'catalogBase' => $catalog_base,
 				)
 			) . ';',
 			'before'

@@ -21,6 +21,7 @@ mkdir -p "$STAGE/wp-media-utility"
 cp "$ROOT/wp-media-utility.php" "$STAGE/wp-media-utility/"
 cp "$ROOT/monitor.js" "$STAGE/wp-media-utility/"
 cp "$ROOT/README.md" "$STAGE/wp-media-utility/"
+cp "$ROOT/catalog.json" "$STAGE/wp-media-utility/"
 [[ -f "$ROOT/LICENSE" ]] && cp "$ROOT/LICENSE" "$STAGE/wp-media-utility/"
 [[ -f "$ROOT/pack.sh" ]] && cp "$ROOT/pack.sh" "$STAGE/wp-media-utility/"
 

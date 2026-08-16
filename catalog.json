@@ -1,0 +1,172 @@
+{
+  "source": {
+    "label": "PR #13068 \u2014 WCUS26 test image library",
+    "prUrl": "https://github.com/WordPress/wordpress-develop/pull/13068",
+    "baseUrl": "https://raw.githubusercontent.com/aaronjorbin/wordpress-develop/csm/test-library/",
+    "note": "Fetched in-browser as File objects. Default: core/upload-media addItems. With Settings \u2192 Insert: Image block blob upload (same as drag-and-drop)."
+  },
+  "groups": [
+    {
+      "id": "heic",
+      "label": "HEIC",
+      "items": [
+        {
+          "id": "heic-as-heic",
+          "name": "heic-as-heic.heic",
+          "path": "tests/images/heic-as-heic.heic",
+          "mime": "image/heic"
+        },
+        {
+          "id": "wc-us-26-heic",
+          "name": "wc-us-26.HEIC",
+          "path": "tests/images/wc-us-26.HEIC",
+          "mime": "image/heic"
+        },
+        {
+          "id": "heic-wrong-jpg",
+          "name": "heic-with-wrong-extention.jpg",
+          "path": "tests/images/heic-with-wrong-extention.jpg",
+          "mime": "image/jpeg"
+        },
+        {
+          "id": "heic-wrong-png",
+          "name": "heic-with-wrong-extention.png",
+          "path": "tests/images/heic-with-wrong-extention.png",
+          "mime": "image/png"
+        }
+      ]
+    },
+    {
+      "id": "webp",
+      "label": "WebP",
+      "items": [
+        {
+          "id": "webp-as-webp",
+          "name": "webp-as-webp.webp",
+          "path": "tests/images/webp-as-webp.webp",
+          "mime": "image/webp"
+        },
+        {
+          "id": "webp-wrong-jpeg",
+          "name": "webp-with-wrong-extention.jpeg",
+          "path": "tests/images/webp-with-wrong-extention.jpeg",
+          "mime": "image/jpeg"
+        },
+        {
+          "id": "webp-wrong-jpg",
+          "name": "webp-with-wrong-extention.jpg",
+          "path": "tests/images/webp-with-wrong-extention.jpg",
+          "mime": "image/jpeg"
+        },
+        {
+          "id": "webp-wrong-png",
+          "name": "webp-with-wrong-extention.png",
+          "path": "tests/images/webp-with-wrong-extention.png",
+          "mime": "image/png"
+        }
+      ]
+    },
+    {
+      "id": "jpeg-misc",
+      "label": "JPEG / wrong extension",
+      "items": [
+        {
+          "id": "jpeg-wrong-gif",
+          "name": "jpeg-with-wrong-extention.gif",
+          "path": "tests/images/jpeg-with-wrong-extention.gif",
+          "mime": "image/gif"
+        },
+        {
+          "id": "jpeg-wrong-png",
+          "name": "jpeg-with-wrong-extention.png",
+          "path": "tests/images/jpeg-with-wrong-extention.png",
+          "mime": "image/png"
+        }
+      ]
+    },
+    {
+      "id": "empty",
+      "label": "Empty files",
+      "items": [
+        {
+          "id": "empty-heic",
+          "name": "empty.heic",
+          "path": "tests/images/empty.heic",
+          "mime": "image/heic"
+        },
+        {
+          "id": "empty-jpg",
+          "name": "empty.jpg",
+          "path": "tests/images/empty.jpg",
+          "mime": "image/jpeg"
+        },
+        {
+          "id": "empty-png",
+          "name": "empty.png",
+          "path": "tests/images/empty.png",
+          "mime": "image/png"
+        }
+      ]
+    },
+    {
+      "id": "other",
+      "label": "Other formats",
+      "items": [
+        {
+          "id": "avif",
+          "name": "MY1A7758.avif",
+          "path": "tests/images/MY1A7758.avif",
+          "mime": "image/avif"
+        },
+        {
+          "id": "jxl",
+          "name": "jxl-as-jxl.jxl",
+          "path": "tests/images/jxl-as-jxl.jxl",
+          "mime": "image/jxl"
+        },
+        {
+          "id": "jxl-wrong-jpg",
+          "name": "jxl-with-wrong-extention.jpg",
+          "path": "tests/images/jxl-with-wrong-extention.jpg",
+          "mime": "image/jpeg"
+        },
+        {
+          "id": "jp2",
+          "name": "jpeg-2000.jp2",
+          "path": "tests/images/jpeg-2000.jp2",
+          "mime": "image/jp2"
+        },
+        {
+          "id": "exr",
+          "name": "openEXR.exr",
+          "path": "tests/images/openEXR.exr",
+          "mime": "image/x-exr"
+        },
+        {
+          "id": "tiff",
+          "name": "tiff.tiff",
+          "path": "tests/images/tiff.tiff",
+          "mime": "image/tiff"
+        }
+      ]
+    }
+  ],
+  "externalDatasets": [
+    {
+      "label": "libwebp test data",
+      "url": "https://chromium.googlesource.com/webm/libwebp-test-data/+/refs/heads/main"
+    },
+    {
+      "label": "libjpeg test images",
+      "url": "https://github.com/winlibs/libjpeg/tree/master/testimages"
+    },
+    {
+      "label": "PNGSuite (HTTP download)",
+      "url": "http://www.schaik.com/pngsuite/PngSuite-2017jul19.tgz"
+    },
+    {
+      "label": "OpenCV readwrite testdata",
+      "url": "https://github.com/opencv/opencv_extra/tree/4.x/testdata/highgui/readwrite"
+    }
+  ]
+}

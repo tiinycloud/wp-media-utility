@@ -8,10 +8,37 @@
 	const boot = window.__wpMediaUtility || {};
 	const MAX_UPLOADS = 100;
 	const MAX_EVENTS_PER_UPLOAD = 40;
+	const SETTINGS_KEY = 'wp-media-utility-settings';
+
+	function loadSettings() {
+		const defaults = { insertIntoEditor: false };
+		try {
+			const raw = window.sessionStorage && sessionStorage.getItem( SETTINGS_KEY );
+			if ( ! raw ) {
+				return defaults;
+			}
+			const parsed = JSON.parse( raw );
+			return {
+				insertIntoEditor: !!( parsed && parsed.insertIntoEditor ),
+			};
+		} catch ( e ) {
+			return defaults;
+		}
+	}
+
+	function saveSettings() {
+		try {
+			if ( window.sessionStorage ) {
+				sessionStorage.setItem( SETTINGS_KEY, JSON.stringify( state.settings ) );
+			}
+		} catch ( e ) {
+			// ignore quota / private mode
+		}
+	}
 
 	const state = {
 		collapsed: false,
-		tab: 'uploads', // uploads | values
+		tab: 'uploads', // uploads (Logs) | values (Server) | test (Test Files) | settings
 		uploads: {}, // key -> upload group
 		uploadOrder: [], // newest first
 		pendingCreates: [], // queue correlating create start -> response
@@ -27,6 +54,20 @@
 		diagnosticsError: '',
 		valuesOpen: {}, // section expand state
 		gatesOpen: false,
+		catalog: null,
+		catalogLoading: false,
+		catalogError: '',
+		testStatus: {}, // itemId -> { status, note, fileName, uploadKey }
+		testGroupOpen: {}, // groupId -> bool
+		testOpen: {}, // itemId -> expanded event log
+		settings: loadSettings(),
+		testBatch: {
+			running: false,
+			cancel: false,
+			done: 0,
+			total: 0,
+		},
+		renderTimer: null,
 	};
 
 	let pendingSeq = 0;
@@ -56,6 +97,17 @@
 	function isoNow() {
 		return new Date().toISOString();
 	}
+
+	function scheduleRender() {
+		if ( state.renderTimer ) {
+			return;
+		}
+		state.renderTimer = setTimeout( () => {
+			state.renderTimer = null;
+			render();
+		}, 60 );
+	}
+
 
 	function detect() {
 		const out = {
@@ -457,6 +509,242 @@
 		return { label: 'PENDING', tone: 'muted', filter: 'all' };
 	}
 
+	function linkTestUploadsByName() {
+		Object.keys( state.testStatus ).forEach( ( id ) => {
+			const st = state.testStatus[ id ];
+			if ( ! st || ! st.fileName ) {
+				return;
+			}
+			if ( st.uploadKey && state.uploads[ st.uploadKey ] ) {
+				return;
+			}
+			for ( let i = 0; i < state.uploadOrder.length; i++ ) {
+				const key = state.uploadOrder[ i ];
+				const u = state.uploads[ key ];
+				if ( u && u.name === st.fileName ) {
+					st.uploadKey = key;
+					break;
+				}
+			}
+		} );
+	}
+
+	function resolveTestUpload( entry ) {
+		const st = state.testStatus[ entry.id ];
+		if ( st && st.uploadKey && state.uploads[ st.uploadKey ] ) {
+			return state.uploads[ st.uploadKey ];
+		}
+		const name = ( st && st.fileName ) || entry.name;
+		if ( ! name ) {
+			return null;
+		}
+		for ( let i = 0; i < state.uploadOrder.length; i++ ) {
+			const key = state.uploadOrder[ i ];
+			const u = state.uploads[ key ];
+			if ( u && u.name === name ) {
+				if ( st ) {
+					st.uploadKey = key;
+				}
+				return u;
+			}
+		}
+		return null;
+	}
+
+
+	function queueErrorForName( fileName ) {
+		if ( ! fileName ) {
+			return '';
+		}
+		for ( let i = 0; i < state.queueSnapshot.length; i++ ) {
+			const item = state.queueSnapshot[ i ];
+			if ( item && item.name === fileName && item.error ) {
+				return String( item.error );
+			}
+		}
+		return '';
+	}
+
+	function noticeErrorForName( fileName ) {
+		if ( ! fileName || ! window.wp || ! wp.data || typeof wp.data.select !== 'function' ) {
+			return '';
+		}
+		try {
+			const sel = wp.data.select( 'core/notices' );
+			if ( ! sel || typeof sel.getNotices !== 'function' ) {
+				return '';
+			}
+			const notices = sel.getNotices() || [];
+			for ( let i = 0; i < notices.length; i++ ) {
+				const n = notices[ i ];
+				const status = n.status || n.type || '';
+				if ( status && status !== 'error' ) {
+					continue;
+				}
+				const content = String( n.content || n.message || '' );
+				if ( content.indexOf( fileName ) !== -1 ) {
+					return content;
+				}
+			}
+		} catch ( e ) {
+			// ignore
+		}
+		return '';
+	}
+
+	function syncTestOutcomes() {
+		let changed = false;
+		Object.keys( state.testStatus ).forEach( ( id ) => {
+			const st = state.testStatus[ id ];
+			if ( ! st || ! st.fileName || st.status === 'fetching' ) {
+				return;
+			}
+			const entry = { id: id, name: st.fileName };
+			const upload = resolveTestUpload( entry );
+			const failMsg =
+				queueErrorForName( st.fileName ) ||
+				noticeErrorForName( st.fileName ) ||
+				( upload && upload.error ) ||
+				'';
+
+			if ( failMsg ) {
+				const note = failMsg.length > 160 ? failMsg.slice( 0, 157 ) + '…' : failMsg;
+				if ( st.status !== 'error' || st.note !== note || st.outcome !== 'FAIL' ) {
+					st.status = 'error';
+					st.note = note;
+					st.outcome = 'FAIL';
+					changed = true;
+				}
+				return;
+			}
+
+			if ( ! upload ) {
+				if ( st.status === 'queued' || st.status === 'running' ) {
+					const note = st.note || 'Waiting for pipeline…';
+					if ( st.outcome !== 'RUNNING' ) {
+						st.outcome = 'RUNNING';
+						st.status = 'running';
+						st.note = note;
+						changed = true;
+					}
+				}
+				return;
+			}
+
+			const ds = deriveStatus( upload );
+			const qbit = upload.queueOp || upload.queueStatus || '';
+			if ( ds.label === 'CLIENT DONE' ) {
+				const note =
+					'PASS · CSM finalize' +
+					( upload.sizes.length ? ' · ' + upload.sizes.length + ' sizes' : '' ) +
+					( upload.mediaId ? ' · #' + upload.mediaId : '' );
+				if ( st.status !== 'done' || st.outcome !== 'PASS' || st.note !== note ) {
+					st.status = 'done';
+					st.outcome = 'PASS';
+					st.note = note;
+					changed = true;
+				}
+				return;
+			}
+			if ( ds.label === 'ERROR' ) {
+				const note = upload.error || 'Upload error';
+				if ( st.status !== 'error' || st.outcome !== 'FAIL' ) {
+					st.status = 'error';
+					st.outcome = 'FAIL';
+					st.note = note;
+					changed = true;
+				}
+				return;
+			}
+			if ( ds.label === 'SERVER' ) {
+				const qActive = state.queueSnapshot.some(
+					( item ) =>
+						item &&
+						item.name === st.fileName &&
+						item.status &&
+						String( item.status ).toUpperCase() !== 'COMPLETED' &&
+						! item.error
+				);
+				if ( qActive ) {
+					const note = 'SERVER · ' + ( qbit || 'processing' );
+					if ( st.outcome !== 'RUNNING' || st.note !== note ) {
+						st.status = 'running';
+						st.outcome = 'RUNNING';
+						st.note = note;
+						changed = true;
+					}
+					return;
+				}
+				const note =
+					'SERVER path (generate_sub_sizes=true)' +
+					( upload.mediaId ? ' · #' + upload.mediaId : '' );
+				if ( st.outcome !== 'SERVER' || st.note !== note ) {
+					st.status = 'done';
+					st.outcome = 'SERVER';
+					st.note = note;
+					changed = true;
+				}
+				return;
+			}
+			const note =
+				ds.label +
+				( qbit ? ' · ' + qbit : '' ) +
+				( upload.mediaId ? ' · #' + upload.mediaId : '' );
+			if ( st.status !== 'running' || st.outcome !== 'RUNNING' || st.note !== note ) {
+				st.status = 'running';
+				st.outcome = 'RUNNING';
+				st.note = note;
+				changed = true;
+			}
+		} );
+		return changed;
+	}
+
+	function computeTestOutcome( entry, st, upload ) {
+		const failMsg =
+			( st && st.status === 'error' && st.note ) ||
+			queueErrorForName( entry.name ) ||
+			noticeErrorForName( entry.name ) ||
+			( upload && upload.error ) ||
+			'';
+		if ( failMsg ) {
+			return { label: 'FAIL', tone: 'bad', note: failMsg };
+		}
+		if ( st && st.outcome === 'PASS' ) {
+			return { label: 'PASS', tone: 'ok', note: st.note || 'PASS' };
+		}
+		if ( st && st.outcome === 'SERVER' ) {
+			return { label: 'SERVER', tone: 'warn', note: st.note || 'SERVER' };
+		}
+		if ( upload ) {
+			const ds = deriveStatus( upload );
+			if ( ds.label === 'CLIENT DONE' ) {
+				return { label: 'PASS', tone: 'ok', note: 'CSM finalize complete' };
+			}
+			if ( ds.label === 'ERROR' ) {
+				return { label: 'FAIL', tone: 'bad', note: upload.error || 'error' };
+			}
+			if ( ds.label === 'SERVER' ) {
+				return { label: 'SERVER', tone: 'warn', note: 'Server-side sub-sizes' };
+			}
+			return {
+				label: 'RUNNING',
+				tone: 'warn',
+				note: ds.label + ( upload.queueOp ? ' · ' + upload.queueOp : '' ),
+			};
+		}
+		if ( st && st.status === 'fetching' ) {
+			return { label: 'FETCH', tone: 'warn', note: st.note || 'Downloading…' };
+		}
+		if ( st && ( st.status === 'queued' || st.status === 'running' || st.outcome === 'RUNNING' ) ) {
+			return { label: 'RUNNING', tone: 'warn', note: st.note || 'In progress…' };
+		}
+		if ( st && st.status === 'done' ) {
+			return { label: 'PASS', tone: 'ok', note: st.note || 'done' };
+		}
+		return null;
+	}
+
 	function getUploadList() {
 		return state.uploadOrder
 			.map( ( key ) => state.uploads[ key ] )
@@ -610,6 +898,8 @@
 		state.pendingCreates = [];
 		state.queueSnapshot = [];
 		state.openKeys = {};
+		state.testStatus = {};
+		state.testOpen = {};
 		queueLog( { type: 'meta', note: 'session UI cleared' } );
 		render();
 	}
@@ -685,6 +975,9 @@
 			upload.events.length = MAX_EVENTS_PER_UPLOAD;
 		}
 
+		linkTestUploadsByName();
+		syncTestOutcomes();
+
 		queueLog( {
 			type: 'rest',
 			mediaId: upload.mediaId,
@@ -697,7 +990,7 @@
 			size: evt.size || '',
 			status: deriveStatus( upload ).label,
 		} );
-		render();
+		scheduleRender();
 	}
 
 	function pathLabel( path ) {
@@ -746,6 +1039,10 @@
 	}
 
 	function installFetchTap() {
+		if ( window.__wpMediaUtilityTapsInstalled ) {
+			return;
+		}
+		window.__wpMediaUtilityTapsInstalled = true;
 		if ( window.wp && wp.apiFetch && typeof wp.apiFetch.use === 'function' ) {
 			wp.apiFetch.use( ( options, next ) => {
 				const url = options.url || options.path || '';
@@ -960,10 +1257,14 @@
 				if ( sig !== prevIds ) {
 					prevIds = sig;
 					state.queueSnapshot = snap;
-					if ( snap.length ) {
+					linkTestUploadsByName();
+					syncTestOutcomes();
+					// Throttle verbose queue snapshots (avoid JSONL storms during Upload all).
+					if ( snap.length && ( ! state._lastQueueLogAt || Date.now() - state._lastQueueLogAt > 2000 ) ) {
+						state._lastQueueLogAt = Date.now();
 						queueLog( { type: 'queue', items: snap } );
 					}
-					render();
+					scheduleRender();
 				}
 			} catch ( e ) {
 				// ignore
@@ -979,6 +1280,8 @@
 					node.className = attrs[ k ];
 				} else if ( k === 'text' ) {
 					node.textContent = attrs[ k ];
+				} else if ( k === 'checked' ) {
+					node.checked = !! attrs[ k ];
 				} else if ( k.startsWith( 'on' ) && typeof attrs[ k ] === 'function' ) {
 					node.addEventListener( k.slice( 2 ).toLowerCase(), attrs[ k ] );
 				} else if ( attrs[ k ] !== undefined && attrs[ k ] !== null ) {
@@ -1104,25 +1407,51 @@
 	}
 
 	async function clearDiskLog( button ) {
-		const ok = window.confirm( 'Clear the on-disk CSM monitor log files?' );
+		const ok = window.confirm(
+			'Clear on-disk log files and this session’s on-screen results?\n\n(Does not delete media library items.)'
+		);
 		if ( ! ok ) {
 			return;
 		}
 		const label = button.textContent;
 		button.disabled = true;
 		try {
+			// Flush any pending writes first so they do not recreate the file after DELETE.
+			if ( state.logFlushTimer ) {
+				clearTimeout( state.logFlushTimer );
+				state.logFlushTimer = null;
+			}
+			state.logBuffer = [];
 			await wp.apiFetch( { path: '/wp-media-utility/v1/log', method: 'DELETE' } );
-			button.textContent = 'Cleared';
-			queueLog( { type: 'meta', note: 'disk log cleared' } );
+			state.uploads = {};
+			state.uploadOrder = [];
+			state.pendingCreates = [];
+			state.queueSnapshot = [];
+			state.openKeys = {};
+			state.testStatus = {};
+			state.testOpen = {};
+			render();
+			const clearLogBtn = Array.from(
+				document.querySelectorAll( '#wp-media-utility .csm-monitor__actions button' )
+			).find( ( b ) => ( b.getAttribute( 'title' ) || '' ).indexOf( 'on-disk' ) !== -1 );
+			const feedback = clearLogBtn || button;
+			feedback.textContent = 'Cleared';
+			feedback.disabled = true;
+			setTimeout( () => {
+				if ( feedback.isConnected ) {
+					feedback.disabled = false;
+					feedback.textContent = label;
+				}
+			}, 1200 );
 		} catch ( e ) {
 			button.textContent = 'Failed';
+			setTimeout( () => {
+				if ( button.isConnected ) {
+					button.disabled = false;
+					button.textContent = label;
+				}
+			}, 1200 );
 		}
-		setTimeout( () => {
-			if ( button.isConnected ) {
-				button.disabled = false;
-				button.textContent = label;
-			}
-		}, 1200 );
 	}
 
 	async function wipeMediaLibrary( button ) {
@@ -1131,7 +1460,7 @@
 			return;
 		}
 		const ok = window.confirm(
-			'Delete ALL media library items?\n\nThis removes attachments so you can re-upload the same test files.'
+			'Delete ALL media library items?\n\nAdmin-only. Type OK mentally — this cannot be undone.\nRemoves attachments so you can re-upload the same test files.'
 		);
 		if ( ! ok ) {
 			return;
@@ -1171,6 +1500,9 @@
 			state.uploads = {};
 			state.uploadOrder = [];
 			state.queueSnapshot = [];
+			state.openKeys = {};
+			state.testStatus = {};
+			state.testOpen = {};
 			queueLog( {
 				type: 'meta',
 				note: 'Wiped media · deleted ' + deleted.length + ( failed.length ? ' · failed ' + failed.length : '' ),
@@ -1179,6 +1511,52 @@
 			window.alert( 'Wipe failed: ' + ( ( e && e.message ) || e ) );
 		}
 		render();
+	}
+
+	function renderUploadDetailBody( u ) {
+		const bodyChildren = [];
+		if ( u.sizes.length ) {
+			bodyChildren.push(
+				el( 'div', { className: 'csm-upload__sizes' }, [
+					el( 'span', { className: 'csm-upload__sizes-label', text: 'Sizes' } ),
+					...u.sizes.map( ( s ) => pill( s, 'ok' ) ),
+				] )
+			);
+		}
+		if ( u.queueOp || u.queueStatus ) {
+			bodyChildren.push(
+				el( 'div', {
+					className: 'csm-upload__queue',
+					text: 'Queue: ' + ( u.queueStatus || '' ) + ( u.queueOp ? ' · ' + u.queueOp : '' ),
+				} )
+			);
+		}
+		if ( u.error ) {
+			bodyChildren.push( el( 'div', { className: 'csm-upload__err', text: u.error } ) );
+		}
+		const feed = el( 'div', { className: 'csm-upload__events' } );
+		u.events.forEach( ( evt ) => {
+			feed.appendChild(
+				el( 'div', { className: 'csm-event' }, [
+					el( 'div', { className: 'csm-event__top' }, [
+						pill( pathLabel( evt.path ), evt.path === 'client' ? 'ok' : evt.path === 'server' ? 'warn' : 'muted' ),
+						pill( evt.kind, 'muted' ),
+						el( 'span', { className: 'csm-event__time', text: evt.t } ),
+					] ),
+					el( 'div', { className: 'csm-event__note', text: evt.note || evt.kind } ),
+				] )
+			);
+		} );
+		if ( ! u.events.length && ! u.error ) {
+			feed.appendChild(
+				el( 'div', {
+					className: 'csm-event__note',
+					text: 'Waiting for create / sideload / finalize…',
+				} )
+			);
+		}
+		bodyChildren.push( feed );
+		return bodyChildren;
 	}
 
 	function renderUploadGroup( key ) {
@@ -1219,46 +1597,9 @@
 			]
 		);
 
-		const bodyChildren = [];
-		if ( open ) {
-			if ( u.sizes.length ) {
-				bodyChildren.push(
-					el( 'div', { className: 'csm-upload__sizes' }, [
-						el( 'span', { className: 'csm-upload__sizes-label', text: 'Sizes' } ),
-						...u.sizes.map( ( s ) => pill( s, 'ok' ) ),
-					] )
-				);
-			}
-			if ( u.queueOp || u.queueStatus ) {
-				bodyChildren.push(
-					el( 'div', {
-						className: 'csm-upload__queue',
-						text: 'Queue: ' + ( u.queueStatus || '' ) + ( u.queueOp ? ' · ' + u.queueOp : '' ),
-					} )
-				);
-			}
-			if ( u.error ) {
-				bodyChildren.push( el( 'div', { className: 'csm-upload__err', text: u.error } ) );
-			}
-			const feed = el( 'div', { className: 'csm-upload__events' } );
-			u.events.forEach( ( evt ) => {
-				feed.appendChild(
-					el( 'div', { className: 'csm-event' }, [
-						el( 'div', { className: 'csm-event__top' }, [
-							pill( pathLabel( evt.path ), evt.path === 'client' ? 'ok' : evt.path === 'server' ? 'warn' : 'muted' ),
-							pill( evt.kind, 'muted' ),
-							el( 'span', { className: 'csm-event__time', text: evt.t } ),
-						] ),
-						el( 'div', { className: 'csm-event__note', text: evt.note || evt.kind } ),
-					] )
-				);
-			} );
-			bodyChildren.push( feed );
-		}
-
 		return el( 'div', { className: 'csm-upload' + ( open ? ' is-open' : '' ) }, [
 			summary,
-			open ? el( 'div', { className: 'csm-upload__body' }, bodyChildren ) : null,
+			open ? el( 'div', { className: 'csm-upload__body' }, renderUploadDetailBody( u ) ) : null,
 		] );
 	}
 
@@ -1435,12 +1776,16 @@
 	function renderTabs( root ) {
 		const bar = el( 'div', { className: 'csm-monitor__tabs' } );
 		const tabTips = {
-			uploads: 'Live upload pipeline: create → sideload → finalize',
-			values: 'Live flags, filters, REST image settings, and browser probes',
+			uploads: 'Live upload pipeline log: create → sideload → finalize',
+			values: 'Server/PHP filters, REST image settings, and browser probes',
+			test: 'PR #13068 fixtures — upload through CSM with per-file status + event log',
+			settings: 'Utility preferences (persist for this browser tab)',
 		};
 		[
-			[ 'uploads', 'Uploads' ],
-			[ 'values', 'Values' ],
+			[ 'uploads', 'Logs' ],
+			[ 'values', 'Server' ],
+			[ 'test', 'Test Files' ],
+			[ 'settings', 'Settings' ],
 		].forEach( ( [ id, label ] ) => {
 			bar.appendChild(
 				el( 'button', {
@@ -1452,6 +1797,8 @@
 						state.tab = id;
 						if ( id === 'values' && ! state.diagnostics && ! state.diagnosticsLoading ) {
 							loadDiagnostics( false );
+						} else if ( id === 'test' && ! state.catalog && ! state.catalogLoading ) {
+							loadCatalog();
 						} else {
 							render();
 						}
@@ -1460,6 +1807,691 @@
 			);
 		} );
 		root.appendChild( bar );
+	}
+
+	function setSetting( key, value ) {
+		state.settings[ key ] = value;
+		saveSettings();
+		render();
+	}
+
+	function normalizeMediaForBlock( media ) {
+		if ( ! media || typeof media !== 'object' ) {
+			return null;
+		}
+		const id = media.id || media.attachment_id;
+		const url = media.url || media.source_url || '';
+		if ( ! id || ! url ) {
+			return null;
+		}
+		if ( String( url ).indexOf( 'blob:' ) === 0 ) {
+			return null;
+		}
+		const mime = media.mime_type || media.mime || '';
+		if ( mime && String( mime ).indexOf( 'image/' ) !== 0 ) {
+			return null;
+		}
+		const caption =
+			typeof media.caption === 'string'
+				? media.caption
+				: ( media.caption && media.caption.raw ) || '';
+		return {
+			id: Number( id ),
+			url: String( url ),
+			alt: media.alt_text || media.alt || '',
+			caption: caption,
+			mime: mime,
+		};
+	}
+
+	function createBlobUrl( file ) {
+		if ( window.wp && wp.blob && typeof wp.blob.createBlobURL === 'function' ) {
+			return wp.blob.createBlobURL( file );
+		}
+		return URL.createObjectURL( file );
+	}
+
+	/**
+	 * Same path as dropping a file on the canvas: insert core/image with a blob,
+	 * then let the block's mediaUpload pipeline (CSM) finish and replace blob → attachment.
+	 */
+	function insertFileViaEditor( file ) {
+		if ( ! window.wp || ! wp.blocks || typeof wp.blocks.createBlock !== 'function' ) {
+			return { ok: false, reason: 'wp.blocks unavailable' };
+		}
+		if ( ! wp.data || typeof wp.data.dispatch !== 'function' || typeof wp.data.select !== 'function' ) {
+			return { ok: false, reason: 'wp.data unavailable' };
+		}
+		const select = wp.data.select( 'core/block-editor' );
+		const dispatch = wp.data.dispatch( 'core/block-editor' );
+		if ( ! select || ! dispatch || typeof dispatch.insertBlocks !== 'function' ) {
+			return { ok: false, reason: 'block-editor unavailable' };
+		}
+		if ( typeof select.canInsertBlockType === 'function' && ! select.canInsertBlockType( 'core/image' ) ) {
+			return { ok: false, reason: 'core/image not insertable in this editor context' };
+		}
+
+		let blocks = null;
+		try {
+			if ( typeof wp.blocks.findTransform === 'function' && typeof wp.blocks.getBlockTransforms === 'function' ) {
+				const transformation = wp.blocks.findTransform(
+					wp.blocks.getBlockTransforms( 'from' ),
+					( transform ) =>
+						transform.type === 'files' &&
+						( typeof select.canInsertBlockType !== 'function' ||
+							select.canInsertBlockType( transform.blockName ) ) &&
+						typeof transform.isMatch === 'function' &&
+						transform.isMatch( [ file ] )
+				);
+				if ( transformation && typeof transformation.transform === 'function' ) {
+					const updateAttrs =
+						typeof dispatch.updateBlockAttributes === 'function'
+							? ( clientId, attrs ) => dispatch.updateBlockAttributes( clientId, attrs )
+							: undefined;
+					blocks = transformation.transform( [ file ], updateAttrs );
+				}
+			}
+		} catch ( e ) {
+			blocks = null;
+		}
+
+		if ( ! blocks ) {
+			blocks = wp.blocks.createBlock( 'core/image', {
+				blob: createBlobUrl( file ),
+			} );
+		}
+
+		const toInsert = Array.isArray( blocks ) ? blocks : [ blocks ];
+		const before = typeof select.getBlockCount === 'function' ? select.getBlockCount() : 0;
+		try {
+			dispatch.insertBlocks( toInsert, before, undefined, true );
+			const after = typeof select.getBlockCount === 'function' ? select.getBlockCount() : before;
+			if ( after <= before ) {
+				return { ok: false, reason: 'insertBlocks no-op (template lock / filter?)' };
+			}
+			return { ok: true, count: after - before };
+		} catch ( e ) {
+			return { ok: false, reason: String( e && e.message ? e.message : e ) };
+		}
+	}
+
+	function insertMediaAsBlock( media ) {
+		if ( ! state.settings.insertIntoEditor ) {
+			return { ok: false, reason: 'insert off' };
+		}
+		const norm = normalizeMediaForBlock( media );
+		if ( ! norm ) {
+			return { ok: false, reason: 'missing id/url (or not an image)' };
+		}
+		if ( ! window.wp || ! wp.blocks || typeof wp.blocks.createBlock !== 'function' ) {
+			return { ok: false, reason: 'wp.blocks unavailable' };
+		}
+		if ( ! wp.data || typeof wp.data.dispatch !== 'function' || typeof wp.data.select !== 'function' ) {
+			return { ok: false, reason: 'wp.data unavailable' };
+		}
+		const select = wp.data.select( 'core/block-editor' );
+		const dispatch = wp.data.dispatch( 'core/block-editor' );
+		if ( ! select || ! dispatch || typeof dispatch.insertBlocks !== 'function' ) {
+			return { ok: false, reason: 'block-editor unavailable' };
+		}
+		if ( typeof select.canInsertBlockType === 'function' && ! select.canInsertBlockType( 'core/image' ) ) {
+			return { ok: false, reason: 'core/image not insertable in this editor context' };
+		}
+		try {
+			const block = wp.blocks.createBlock( 'core/image', {
+				id: norm.id,
+				url: norm.url,
+				alt: norm.alt,
+				caption: norm.caption,
+			} );
+			const before = typeof select.getBlockCount === 'function' ? select.getBlockCount() : 0;
+			if ( typeof dispatch.insertBlock === 'function' ) {
+				dispatch.insertBlock( block, before, undefined, true );
+			} else {
+				dispatch.insertBlocks( [ block ], before, undefined, true );
+			}
+			const after = typeof select.getBlockCount === 'function' ? select.getBlockCount() : before;
+			if ( after <= before ) {
+				return { ok: false, reason: 'insertBlocks no-op (template lock / filter?)' };
+			}
+			return { ok: true, id: norm.id };
+		} catch ( e ) {
+			return { ok: false, reason: String( e && e.message ? e.message : e ) };
+		}
+	}
+
+	async function tryInsertForTestEntry( entry, media ) {
+		if ( ! state.settings.insertIntoEditor ) {
+			return { ok: false, reason: 'insert off' };
+		}
+		let inserted = insertMediaAsBlock( media );
+		if ( inserted.ok ) {
+			return inserted;
+		}
+		linkTestUploadsByName();
+		const upload = resolveTestUpload( entry );
+		const mediaId = upload && upload.mediaId ? upload.mediaId : null;
+		if ( mediaId && window.wp && wp.apiFetch ) {
+			try {
+				const att = await wp.apiFetch( { path: '/wp/v2/media/' + mediaId } );
+				inserted = insertMediaAsBlock( att );
+				if ( inserted.ok ) {
+					return inserted;
+				}
+			} catch ( e ) {
+				inserted = {
+					ok: false,
+					reason:
+						( inserted && inserted.reason ? inserted.reason + ' · ' : '' ) +
+						'REST fetch failed: ' +
+						( ( e && e.message ) || e ),
+				};
+			}
+		}
+		return inserted;
+	}
+
+	function renderSettingsTab( root ) {
+		const insertOn = !! state.settings.insertIntoEditor;
+		root.appendChild(
+			el( 'div', { className: 'csm-settings' }, [
+				el( 'div', {
+					className: 'csm-settings__intro',
+					text: 'Preferences for this browser tab (saved in sessionStorage).',
+				} ),
+				el( 'label', { className: 'csm-settings__row' }, [
+					el( 'input', {
+						type: 'checkbox',
+						checked: insertOn,
+						onChange: ( e ) => setSetting( 'insertIntoEditor', !! e.target.checked ),
+					} ),
+					el( 'span', {
+						className: 'csm-settings__label',
+						text: 'Insert Image blocks with Test Files uploads',
+					} ),
+				] ),
+				el( 'div', {
+					className: 'csm-monitor__hint',
+					text: insertOn
+						? 'Inserts an Image block first (drag-and-drop path). Empty/0-byte fixtures skip insert and still test reject. Upload all can add many blocks — use Stop.'
+						: 'Default: upload only (media library + Logs). Turn on to also insert Image blocks into the post.',
+				} ),
+			] )
+		);
+	}
+
+	async function loadCatalog() {
+		if ( state.catalogLoading ) {
+			return;
+		}
+		state.catalogLoading = true;
+		state.catalogError = '';
+		render();
+		try {
+			const url = boot.catalogUrl;
+			if ( ! url ) {
+				throw new Error( 'catalog.json URL missing from plugin boot' );
+			}
+			const res = await fetch( url, { credentials: 'same-origin' } );
+			if ( ! res.ok ) {
+				throw new Error( 'HTTP ' + res.status );
+			}
+			const data = await res.json();
+			if ( boot.catalogBase && data.source ) {
+				data.source.baseUrl = boot.catalogBase;
+			}
+			state.catalog = data;
+			( data.groups || [] ).forEach( ( g ) => {
+				if ( state.testGroupOpen[ g.id ] === undefined ) {
+					state.testGroupOpen[ g.id ] = true;
+				}
+			} );
+		} catch ( e ) {
+			state.catalogError = String( e && e.message ? e.message : e );
+		}
+		state.catalogLoading = false;
+		render();
+	}
+
+	function setTestStatus( id, status, note, extra ) {
+		const prev = state.testStatus[ id ] || {};
+		state.testStatus[ id ] = {
+			status: status || 'idle',
+			note: note || '',
+			at: now(),
+			fileName: ( extra && extra.fileName ) || prev.fileName || '',
+			uploadKey: ( extra && ( 'uploadKey' in extra ) ) ? extra.uploadKey : ( prev.uploadKey || '' ),
+		};
+	}
+
+	function testStatusTone( status ) {
+		if ( status === 'done' || status === 'queued' ) {
+			return 'ok';
+		}
+		if ( status === 'error' ) {
+			return 'bad';
+		}
+		if ( status === 'fetching' ) {
+			return 'warn';
+		}
+		return 'muted';
+	}
+
+	function testRowPills( entry, st, upload ) {
+		const pills = [];
+		const outcome = computeTestOutcome( entry, st, upload );
+		if ( outcome ) {
+			pills.push( pill( outcome.label, outcome.tone, outcome.note ) );
+		}
+		if ( upload && upload.path === 'client' && outcome && outcome.label === 'PASS' ) {
+			pills.push( pill( 'CSM', 'ok', pathTip( 'client' ) ) );
+		}
+		if ( upload && upload.mediaId && ( ! outcome || outcome.note.indexOf( '#' + upload.mediaId ) === -1 ) ) {
+			pills.push( pill( '#' + upload.mediaId, 'muted', 'Attachment ID ' + upload.mediaId ) );
+		}
+		if ( upload && upload.sizes.length ) {
+			pills.push(
+				pill( upload.sizes.length + ' sizes', 'muted', 'Client-generated sizes: ' + upload.sizes.join( ', ' ) )
+			);
+		}
+		return pills;
+	}
+
+	async function uploadTestFile( entry ) {
+		if ( ! entry || ! entry.id ) {
+			return;
+		}
+		if ( state.testBatch.running && state.testBatch.cancel ) {
+			return;
+		}
+		const base =
+			( state.catalog && state.catalog.source && state.catalog.source.baseUrl ) ||
+			boot.catalogBase ||
+			'';
+		if ( ! base ) {
+			setTestStatus( entry.id, 'error', 'Missing catalog base URL', { fileName: entry.name } );
+			scheduleRender();
+			return;
+		}
+		if ( ! window.wp || ! wp.data || typeof wp.data.dispatch !== 'function' ) {
+			setTestStatus( entry.id, 'error', 'wp.data unavailable', { fileName: entry.name } );
+			scheduleRender();
+			return;
+		}
+
+		setTestStatus( entry.id, 'fetching', 'Downloading fixture…', {
+			fileName: entry.name,
+			uploadKey: '',
+		} );
+		state.testOpen[ entry.id ] = true;
+		scheduleRender();
+
+		try {
+			const url = base.replace( /\/?$/, '/' ) + String( entry.path || '' ).replace( /^\//, '' );
+			const res = await fetch( url, { mode: 'cors' } );
+			if ( ! res.ok ) {
+				throw new Error( 'Fetch failed HTTP ' + res.status );
+			}
+			const blob = await res.blob();
+			const type = entry.mime || blob.type || 'application/octet-stream';
+			const file = new File( [ blob ], entry.name || 'test-file', { type: type } );
+
+			// Empty fixtures: never insert Image blocks; exercise reject via addItems.
+			const wantInsert = state.settings.insertIntoEditor && file.size > 0;
+			if ( state.settings.insertIntoEditor && file.size === 0 ) {
+				setTestStatus( entry.id, 'running', 'Empty file — skip insert; testing reject via upload-media', {
+					fileName: entry.name,
+				} );
+			}
+
+			if ( wantInsert ) {
+				const inserted = insertFileViaEditor( file );
+				if ( inserted.ok ) {
+					setTestStatus( entry.id, 'running', 'Image block inserted — waiting for CSM/editor upload…', {
+						fileName: entry.name,
+					} );
+					queueLog( {
+						type: 'meta',
+						note: 'test upload+insert · ' + entry.name,
+						testId: entry.id,
+					} );
+					linkTestUploadsByName();
+					syncTestOutcomes();
+					scheduleRender();
+					return;
+				}
+				console.warn( '[wp-media-utility] insertFileViaEditor failed, falling back to addItems', inserted );
+			}
+
+			const dispatch = wp.data.dispatch( 'core/upload-media' );
+			if ( ! dispatch || typeof dispatch.addItems !== 'function' ) {
+				throw new Error( 'core/upload-media addItems unavailable' );
+			}
+			setTestStatus( entry.id, 'running', 'Queued in upload-media (' + file.size + ' bytes)', {
+				fileName: entry.name,
+			} );
+			scheduleRender();
+			dispatch.addItems( {
+				files: [ file ],
+				onError: ( err ) => {
+					const msg = ( err && ( err.message || err.code ) ) || 'Upload error';
+					setTestStatus( entry.id, 'error', msg, { fileName: entry.name } );
+					const st = state.testStatus[ entry.id ];
+					if ( st ) {
+						st.outcome = 'FAIL';
+					}
+					scheduleRender();
+				},
+				onSuccess: () => {
+					linkTestUploadsByName();
+					syncTestOutcomes();
+					scheduleRender();
+				},
+			} );
+			queueLog( {
+				type: 'meta',
+				note: 'test upload · ' + entry.name,
+				testId: entry.id,
+			} );
+		} catch ( e ) {
+			setTestStatus( entry.id, 'error', String( e && e.message ? e.message : e ), {
+				fileName: entry.name,
+			} );
+			const st = state.testStatus[ entry.id ];
+			if ( st ) {
+				st.outcome = 'FAIL';
+			}
+			scheduleRender();
+		}
+	}
+
+	async function uploadTestGroup( group ) {
+		const items = ( group && group.items ) || [];
+		const owned = ! state.testBatch.running;
+		if ( owned ) {
+			state.testBatch = {
+				running: true,
+				cancel: false,
+				done: 0,
+				total: items.length,
+			};
+			scheduleRender();
+		}
+		for ( let i = 0; i < items.length; i++ ) {
+			if ( state.testBatch.cancel ) {
+				break;
+			}
+			// eslint-disable-next-line no-await-in-loop
+			await uploadTestFile( items[ i ] );
+			if ( owned ) {
+				state.testBatch.done = i + 1;
+				scheduleRender();
+			}
+			// eslint-disable-next-line no-await-in-loop
+			await new Promise( ( r ) => setTimeout( r, 350 ) );
+		}
+		if ( owned ) {
+			state.testBatch.running = false;
+			syncTestOutcomes();
+			scheduleRender();
+		}
+	}
+
+	async function uploadTestAll() {
+		if ( state.testBatch.running ) {
+			return;
+		}
+		const groups = ( state.catalog && state.catalog.groups ) || [];
+		const items = [];
+		groups.forEach( ( g ) => ( g.items || [] ).forEach( ( it ) => items.push( it ) ) );
+		state.testBatch = {
+			running: true,
+			cancel: false,
+			done: 0,
+			total: items.length,
+		};
+		scheduleRender();
+		for ( let i = 0; i < items.length; i++ ) {
+			if ( state.testBatch.cancel ) {
+				break;
+			}
+			// eslint-disable-next-line no-await-in-loop
+			await uploadTestFile( items[ i ] );
+			state.testBatch.done = i + 1;
+			scheduleRender();
+			// eslint-disable-next-line no-await-in-loop
+			await new Promise( ( r ) => setTimeout( r, 350 ) );
+		}
+		state.testBatch.running = false;
+		syncTestOutcomes();
+		scheduleRender();
+	}
+
+	function cancelTestBatch() {
+		if ( state.testBatch.running ) {
+			state.testBatch.cancel = true;
+			scheduleRender();
+		}
+	}
+
+	function renderTestFileRow( item ) {
+		const st = state.testStatus[ item.id ] || { status: 'idle', note: '' };
+		const upload = resolveTestUpload( item );
+		const hasDetail = !!( upload || ( st.status && st.status !== 'idle' ) );
+		const open = !! state.testOpen[ item.id ];
+		const pills = testRowPills( item, st, upload );
+
+		const expand = el(
+			hasDetail ? 'button' : 'div',
+			hasDetail
+				? {
+						className: 'csm-test__summary',
+						type: 'button',
+						title: open ? 'Collapse upload log' : 'Expand upload log',
+						onClick: () => {
+							state.testOpen[ item.id ] = ! open;
+							render();
+						},
+				  }
+				: { className: 'csm-test__summary csm-test__summary--static' },
+			[
+				hasDetail
+					? el( 'span', {
+							className: 'csm-upload__chevron',
+							text: open ? '▾' : '▸',
+					  } )
+					: el( 'span', { className: 'csm-upload__chevron', text: ' ' } ),
+				el( 'div', { className: 'csm-test__meta' }, [
+					el( 'div', { className: 'csm-test__name', text: item.name, title: item.path } ),
+					( () => {
+						const outcome = computeTestOutcome( item, st, upload );
+						if ( ! outcome || ! outcome.note ) {
+							return null;
+						}
+						return el( 'div', {
+							className: 'csm-test__note',
+							text: outcome.note,
+							title: outcome.note,
+						} );
+					} )(),
+				] ),
+				el( 'div', { className: 'csm-test__tags' }, pills ),
+			]
+		);
+
+		const actions = el( 'div', { className: 'csm-test__actions' }, [
+			el( 'button', {
+				className: 'csm-monitor__toggle',
+				type: 'button',
+				text: st.status === 'fetching' ? '…' : 'Upload',
+				title: 'Fetch from GitHub raw and upload via core/upload-media addItems',
+				disabled: st.status === 'fetching' || undefined,
+				onClick: () => uploadTestFile( item ),
+			} ),
+		] );
+
+		const head = el( 'div', { className: 'csm-test__head' }, [ expand, actions ] );
+
+		const detailKids = [];
+		if ( open && hasDetail ) {
+			if ( upload ) {
+				detailKids.push( ...renderUploadDetailBody( upload ) );
+			} else {
+				detailKids.push(
+					el( 'div', {
+						className: 'csm-upload__queue',
+						text: st.note || st.status || 'No pipeline events yet',
+					} )
+				);
+			}
+		}
+
+		return el( 'div', { className: 'csm-test__row' + ( open ? ' is-open' : '' ) }, [
+			head,
+			open && detailKids.length
+				? el( 'div', { className: 'csm-test__detail csm-upload__body' }, detailKids )
+				: null,
+		] );
+	}
+
+	function renderTestTab( root ) {
+		const src = ( state.catalog && state.catalog.source ) || {};
+		root.appendChild(
+			el( 'div', { className: 'csm-test__intro' }, [
+				el( 'div', {
+					className: 'csm-test__intro-text',
+					text: src.note || 'Load PR #13068 fixtures and upload through client-side media.',
+				} ),
+				src.prUrl
+					? el( 'a', {
+							className: 'csm-test__link',
+							href: src.prUrl,
+							target: '_blank',
+							rel: 'noopener noreferrer',
+							text: 'Open PR #13068',
+							title: 'WordPress develop PR with the test image library',
+					  } )
+					: null,
+				el( 'button', {
+					className: 'csm-monitor__toggle',
+					type: 'button',
+					text: state.catalogLoading ? 'Loading…' : 'Reload catalog',
+					title: 'Reload catalog.json from this plugin',
+					disabled: state.catalogLoading || undefined,
+					onClick: () => {
+						state.catalog = null;
+						loadCatalog();
+					},
+				} ),
+				state.catalog && ! state.testBatch.running
+					? el( 'button', {
+							className: 'csm-monitor__toggle',
+							type: 'button',
+							text: 'Upload all',
+							title: 'Upload every catalog file across all groups (sequential)',
+							onClick: () => uploadTestAll(),
+					  } )
+					: null,
+				state.testBatch.running
+					? el( 'button', {
+							className: 'csm-monitor__toggle csm-monitor__toggle--danger',
+							type: 'button',
+							text: 'Stop ' + state.testBatch.done + '/' + state.testBatch.total,
+							title: 'Cancel remaining Test Files uploads after the current file',
+							onClick: () => cancelTestBatch(),
+					  } )
+					: null,
+			] )
+		);
+
+		if ( state.catalogError ) {
+			root.appendChild(
+				el( 'div', {
+					className: 'csm-monitor__reason',
+					text: 'Catalog error: ' + state.catalogError,
+				} )
+			);
+		}
+
+		if ( ! state.catalog ) {
+			root.appendChild(
+				el( 'div', {
+					className: 'csm-monitor__empty',
+					text: state.catalogLoading ? 'Loading test catalog…' : 'No catalog loaded.',
+				} )
+			);
+			return;
+		}
+
+		( state.catalog.groups || [] ).forEach( ( group ) => {
+			const open = state.testGroupOpen[ group.id ] !== false;
+			const head = el(
+				'div',
+				{ className: 'csm-test__group-head' },
+				[
+					el( 'button', {
+						className: 'csm-test__group-toggle',
+						type: 'button',
+						text: ( open ? '▾ ' : '▸ ' ) + group.label + ' (' + ( group.items || [] ).length + ')',
+						title: open ? 'Collapse group' : 'Expand group',
+						onClick: () => {
+							state.testGroupOpen[ group.id ] = ! open;
+							render();
+						},
+					} ),
+					el( 'button', {
+						className: 'csm-monitor__toggle',
+						type: 'button',
+						text: 'Upload all',
+						title: 'Upload every file in this group through CSM (sequential)',
+						disabled: state.testBatch.running || undefined,
+						onClick: () => uploadTestGroup( group ),
+					} ),
+				]
+			);
+			root.appendChild( el( 'div', { className: 'csm-test__group' }, [ head ] ) );
+
+			if ( ! open ) {
+				return;
+			}
+
+			( group.items || [] ).forEach( ( item ) => {
+				root.appendChild( renderTestFileRow( item ) );
+			} );
+		} );
+
+		const externals = state.catalog.externalDatasets || [];
+		if ( externals.length ) {
+			root.appendChild(
+				el( 'div', {
+					className: 'csm-monitor__hint',
+					text: 'External datasets (open in a new tab — not fetched by this plugin):',
+				} )
+			);
+			const list = el( 'div', { className: 'csm-test__externals' } );
+			externals.forEach( ( ds ) => {
+				list.appendChild(
+					el( 'a', {
+						className: 'csm-test__link',
+						href: ds.url,
+						target: '_blank',
+						rel: 'noopener noreferrer',
+						text: ds.label,
+						title: ds.url,
+					} )
+				);
+			} );
+			root.appendChild( list );
+		}
+
+		root.appendChild(
+			el( 'div', {
+				className: 'csm-monitor__hint',
+				text: state.settings.insertIntoEditor
+					? 'Insert ON. Rows show PASS / FAIL / RUNNING / SERVER from live CSM + editor notices. Expand for create/sideload/finalize.'
+					: 'Rows show PASS / FAIL / RUNNING / SERVER. Expand for pipeline events. Optional: Settings → Insert Image blocks.',
+			} )
+		);
 	}
 
 	function render() {
@@ -1496,24 +2528,26 @@
 			el( 'button', {
 				className: 'csm-monitor__toggle',
 				type: 'button',
-				text: 'Clear',
+				text: 'Clear session',
 				title: 'Clear on-screen results only (keeps media library and disk logs)',
 				onClick: () => clearSession(),
 			} ),
 			el( 'button', {
 				className: 'csm-monitor__toggle',
 				type: 'button',
-				text: 'Clear log',
-				title: 'Delete on-disk JSONL log files (uploads/wp-media-utility.jsonl and mirror)',
+				text: 'Clear disk log',
+				title: 'Delete on-disk JSONL logs and clear on-screen session results (keeps media library)',
 				onClick: ( e ) => clearDiskLog( e.currentTarget ),
 			} ),
-			el( 'button', {
-				className: 'csm-monitor__toggle csm-monitor__toggle--danger',
-				type: 'button',
-				text: 'Wipe',
-				title: 'Delete ALL media library items on this site (for throwaway test sites)',
-				onClick: ( e ) => wipeMediaLibrary( e.currentTarget ),
-			} ),
+			boot.canDelete
+				? el( 'button', {
+						className: 'csm-monitor__toggle csm-monitor__toggle--danger',
+						type: 'button',
+						text: 'Wipe',
+						title: 'Admin only: delete ALL media library items (throwaway test sites)',
+						onClick: ( e ) => wipeMediaLibrary( e.currentTarget ),
+				  } )
+				: null,
 		] );
 
 		root.appendChild(
@@ -1579,6 +2613,20 @@
 		if ( state.tab === 'values' ) {
 			root.classList.add( 'is-values-tab' );
 			renderValuesTab( root );
+			root.scrollTop = scroll;
+			return;
+		}
+
+		if ( state.tab === 'test' ) {
+			root.classList.add( 'is-test-tab' );
+			renderTestTab( root );
+			root.scrollTop = scroll;
+			return;
+		}
+
+		if ( state.tab === 'settings' ) {
+			root.classList.add( 'is-settings-tab' );
+			renderSettingsTab( root );
 			root.scrollTop = scroll;
 			return;
 		}
@@ -1766,11 +2814,16 @@
 	}
 
 	function injectStyles() {
-		let css = document.getElementById( 'wp-wp-media-utility-style' );
+		let css = document.getElementById( 'wp-media-utility-style' );
 		if ( ! css ) {
 			css = document.createElement( 'style' );
-			css.id = 'wp-wp-media-utility-style';
+			css.id = 'wp-media-utility-style';
 			document.head.appendChild( css );
+		}
+		// Remove botched rename leftover if present.
+		const bad = document.getElementById( 'wp-wp-media-utility-style' );
+		if ( bad && bad !== css ) {
+			bad.remove();
 		}
 		css.textContent = `
 			.csm-monitor {
@@ -1780,7 +2833,9 @@
 				font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 				box-shadow: 0 8px 28px rgba(0,0,0,0.45);
 			}
-			.csm-monitor.is-values-tab { width: 480px; }
+			.csm-monitor.is-values-tab,
+			.csm-monitor.is-test-tab,
+			.csm-monitor.is-settings-tab { width: 480px; }
 			.csm-monitor.is-collapsed { width: 260px; max-height: none; box-shadow: none; }
 			.csm-monitor__header {
 				display: flex; flex-direction: column; gap: 8px;
@@ -1943,6 +2998,69 @@
 				color: #cfcfcf; white-space: pre-wrap; word-break: break-word;
 				max-height: 160px; overflow: auto; font: inherit; font-size: 10px;
 			}
+			.csm-test__intro {
+				display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+				padding: 8px 12px; border-bottom: 1px solid #2a2a2a;
+			}
+			.csm-test__intro-text { flex: 1 1 180px; color: #9a9a9a; font-size: 11px; }
+			.csm-test__link {
+				color: #8ab4ff; text-decoration: none; font-size: 11px;
+				display: inline-block; margin: 2px 8px 2px 0;
+			}
+			.csm-test__link:hover { text-decoration: underline; }
+			.csm-test__group { border-bottom: 1px solid #242424; }
+			.csm-test__group-head {
+				display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+			}
+			.csm-test__group-toggle {
+				flex: 1; text-align: left; background: transparent; border: 0;
+				color: #cfcfcf; cursor: pointer; font: inherit; font-size: 11px;
+				letter-spacing: 0.04em; text-transform: uppercase; padding: 0;
+			}
+			.csm-test__row {
+				padding: 0; border-top: 1px solid #1e1e1e;
+			}
+			.csm-test__head {
+				display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+				padding: 6px 12px 8px;
+			}
+			.csm-test__summary {
+				display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+				flex: 1 1 200px; min-width: 0;
+				padding: 0; background: transparent; border: 0;
+				color: inherit; font: inherit; text-align: left; cursor: pointer;
+			}
+			.csm-test__summary--static { cursor: default; }
+			.csm-test__summary:hover { color: #fff; }
+			.csm-test__meta { flex: 1 1 120px; min-width: 0; }
+			.csm-test__name {
+				font-weight: 600; color: #eee; overflow: hidden;
+				text-overflow: ellipsis; white-space: nowrap;
+			}
+			.csm-test__note {
+				color: #9a9a9a; font-size: 10px; margin-top: 2px;
+				overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+			}
+			.csm-test__tags {
+				display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+			}
+			.csm-test__actions {
+				display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+				margin-left: auto;
+			}
+			.csm-test__detail {
+				padding: 0 12px 8px 28px;
+			}
+			.csm-test__externals { padding: 4px 12px 10px; }
+			.csm-settings { padding: 10px 12px 14px; }
+			.csm-settings__intro { color: #9a9a9a; font-size: 11px; margin-bottom: 10px; }
+			.csm-settings__row {
+				display: flex; gap: 8px; align-items: flex-start;
+				cursor: pointer; color: #e6e6e6; font-size: 12px;
+				margin-bottom: 8px;
+			}
+			.csm-settings__row input { margin-top: 2px; }
+			.csm-settings__label { line-height: 1.35; }
 		`;
 	}
 
@@ -1986,11 +3104,12 @@
 		setInterval( () => {
 			const prev = state.detection && state.detection.ready;
 			const d = detect();
-			if ( prev !== d.ready && state.tab === 'uploads' ) {
-				render();
+			const synced = syncTestOutcomes();
+			if ( ( prev !== d.ready && state.tab === 'uploads' ) || synced ) {
+				scheduleRender();
 			}
 			flushLog();
-		}, 5000 );
+		}, 2000 );
 		window.addEventListener( 'beforeunload', flushLog );
 	}
 
